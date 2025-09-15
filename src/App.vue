@@ -1,6 +1,6 @@
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import LiveChart from './components/LiveChart.vue'
+import ThreeSignalCanvas from './components/ThreeSignalCanvas.vue'
 import { WebSerialService } from './services/webserial'
 
 const service = new WebSerialService()
@@ -15,26 +15,39 @@ function dlog(...args) {
   const now = performance.now()
   if (now - lastLogMs < 250) return
   lastLogMs = now
-  // eslint-disable-next-line no-console
   console.log(...args)
 }
 
-const selectedSensor = ref('S1') // 'S1' or 'S2'
-const selectedSignal = ref('TIA') // default for S1
+const selectedSensor = ref('S1')
+const selectedSignal = ref('TIA')
+
+// Sensor on/off toggles
+const s1Enabled = ref(false)
+const s2Enabled = ref(false)
 
 const s1Options = ['TIA', 'HPF', 'LPF', 'AMP', 'HR', 'SPO2', 'TEMP']
 const s2Options = ['IR', 'RED', 'GREEN', 'HR', 'SPO2']
 
 const maxPoints = 500
-const labels = ref([]) // kept for API, but we won't push strings anymore
+const labels = ref([])
 const s1 = reactive({ TIA: [], HPF: [], LPF: [], AMP: [], HR: [], SPO2: [], TEMP: [] })
 const s2 = reactive({ IR: [], RED: [], GREEN: [], HR: [], SPO2: [] })
 
 function pushSample(arr, v) {
   const num = Number.isFinite(v) ? v : NaN
   if (!Number.isFinite(num)) return
-  arr.push(num)
-  if (arr.length > maxPoints) arr.shift()
+  if (arr.length < maxPoints) {
+    arr.push(num)
+    if (arr.length === maxPoints) {
+      arr._rbIndex = 0
+      arr._rbFull = true
+    }
+    return
+  }
+  if (typeof arr._rbIndex !== 'number') arr._rbIndex = 0
+  arr[arr._rbIndex] = num
+  arr._rbIndex = (arr._rbIndex + 1) % maxPoints
+  arr._rbFull = true
 }
 
 service.setOnLine((raw) => {
@@ -97,6 +110,9 @@ async function onDisconnect() {
   try {
     await service.disconnect()
     connected.value = false
+    // reset toggles when disconnected
+    s1Enabled.value = false
+    s2Enabled.value = false
     statusMsg.value = 'Disconnected'
   } catch (e) {
     statusMsg.value = String(e)
@@ -111,8 +127,8 @@ async function toggleSensor(sensor, enable) {
   }
 }
 
-const ledS1 = ref('off')
-const ledS2 = ref('off')
+const ledS1 = ref('red')
+const ledS2 = ref('red')
 
 async function setLed(sensor, mode) {
   try {
@@ -130,7 +146,20 @@ const visibleData = computed(() => {
   return []
 })
 
-const signalLabel = computed(() => `${selectedSensor.value} - ${selectedSignal.value}`)
+const colorMap = {
+  S1: {
+    TIA: '#00e5ff', HPF: '#6a5acd', LPF: '#1de9b6', AMP: '#ff8a65', HR: '#ffd54f', SPO2: '#a5d6a7', TEMP: '#ff5252'
+  },
+  S2: {
+    IR: '#ff1744', RED: '#ff5252', GREEN: '#00e676', HR: '#ffd740', SPO2: '#b39ddb'
+  }
+}
+
+const canvasColor = computed(() => {
+  const s = selectedSensor.value
+  const k = selectedSignal.value
+  return (colorMap[s] && colorMap[s][k]) || '#00e5ff'
+})
 
 function onSensorChange() {
   if (selectedSensor.value === 'S1' && !s1Options.includes(selectedSignal.value)) selectedSignal.value = 'TIA'
@@ -139,7 +168,7 @@ function onSensorChange() {
 </script>
 
 <template>
-  <div style="max-width: 1000px; margin: 0 auto; padding: 16px;">
+  <div style="max-width: 1100px; margin: 0 auto; padding: 16px;">
     <h2>PPG EduKit Web (Web Serial)</h2>
 
     <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap; margin-bottom: 8px;">
@@ -151,35 +180,50 @@ function onSensorChange() {
       </label>
     </div>
 
-    <div style="display:flex; gap:16px; flex-wrap: wrap; margin: 8px 0;">
+    <div style="display:flex; gap:16px; flex-wrap: wrap; margin: 8px 0; align-items: center;">
       <div>
         <div style="font-weight:600; margin-bottom: 4px;">Sensor Control</div>
-        <div style="display:flex; gap:8px;">
-          <button @click="toggleSensor('S1', true)" :disabled="!connected">S1 On</button>
-          <button @click="toggleSensor('S1', false)" :disabled="!connected">S1 Off</button>
-          <button @click="toggleSensor('S2', true)" :disabled="!connected">S2 On</button>
-          <button @click="toggleSensor('S2', false)" :disabled="!connected">S2 Off</button>
+        <div style="display:flex; gap:16px; align-items:center;">
+          <label style="display:flex; align-items:center; gap:6px;">
+            <span>S1</span>
+            <input type="checkbox" v-model="s1Enabled" @change="toggleSensor('S1', s1Enabled)" :disabled="!connected" />
+          </label>
+          <label style="display:flex; align-items:center; gap:6px;">
+            <span>S2</span>
+            <input type="checkbox" v-model="s2Enabled" @change="toggleSensor('S2', s2Enabled)" :disabled="!connected" />
+          </label>
         </div>
       </div>
       <div>
         <div style="font-weight:600; margin-bottom: 4px;">LED S1</div>
-        <select v-model="ledS1" @change="setLed('S1', ledS1)" :disabled="!connected">
-          <option value="off">Off</option>
-          <option value="red">Red</option>
-          <option value="green">Green</option>
-          <option value="infrared">Infrared</option>
-          <option value="blue">Blue (not supported on S1)</option>
-        </select>
+        <div role="radiogroup" style="display:flex; gap:10px; align-items:center;">
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS1" value="red" v-model="ledS1" @change="setLed('S1', ledS1)" :disabled="!connected" /> Red
+          </label>
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS1" value="green" v-model="ledS1" @change="setLed('S1', ledS1)" :disabled="!connected" /> Green
+          </label>
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS1" value="infrared" v-model="ledS1" @change="setLed('S1', ledS1)" :disabled="!connected" /> Infrared
+          </label>
+        </div>
       </div>
       <div>
         <div style="font-weight:600; margin-bottom: 4px;">LED S2</div>
-        <select v-model="ledS2" @change="setLed('S2', ledS2)" :disabled="!connected">
-          <option value="off">Off</option>
-          <option value="red">Red</option>
-          <option value="green">Green</option>
-          <option value="blue">Blue</option>
-          <option value="infrared">Infrared</option>
-        </select>
+        <div role="radiogroup" style="display:flex; gap:10px; align-items:center;">
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS2" value="red" v-model="ledS2" @change="setLed('S2', ledS2)" :disabled="!connected" /> Red
+          </label>
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS2" value="green" v-model="ledS2" @change="setLed('S2', ledS2)" :disabled="!connected" /> Green
+          </label>
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS2" value="blue" v-model="ledS2" @change="setLed('S2', ledS2)" :disabled="!connected" /> Blue
+          </label>
+          <label style="display:flex; align-items:center; gap:4px;">
+            <input type="radio" name="ledS2" value="infrared" v-model="ledS2" @change="setLed('S2', ledS2)" :disabled="!connected" /> Infrared
+          </label>
+        </div>
       </div>
     </div>
 
@@ -204,14 +248,14 @@ function onSensorChange() {
       </div>
     </div>
 
-    <div style="margin-top: 12px;">
-      <LiveChart :labels="labels" :data="visibleData" :label="signalLabel" />
+    <div style="margin-top: 14px;">
+      <ThreeSignalCanvas :data="visibleData" :color="canvasColor" background="#0b1020" />
     </div>
 
     <div v-if="statusMsg" style="margin-top: 8px; color: #666;">{{ statusMsg }}</div>
 
     <p style="margin-top:12px; color:#888; font-size: 12px;">
-      Note: Web Serial requires a supported Chromium-based browser over a secure context (localhost qualifies). Device protocol assumed per desktop app: lines starting with 'S1,' and 'S2,'.
+      Tip: try switching signals; colors adapt to make each channel distinct.
     </p>
   </div>
 </template>
